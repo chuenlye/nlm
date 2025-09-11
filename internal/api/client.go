@@ -228,8 +228,7 @@ func (c *Client) LoadSource(sourceID string) (*pb.Source, error) {
 	return &source, nil
 }
 
-/*
-func (c *Client) CheckSourceFreshness(sourceID string) (*pb.CheckSourceFreshnessResponse, error) {
+func (c *Client) CheckSourceFreshness(sourceID string) ([]byte, error) {
 	resp, err := c.rpc.Do(rpc.Call{
 		ID:   rpc.RPCCheckSourceFreshness,
 		Args: []interface{}{sourceID},
@@ -237,14 +236,8 @@ func (c *Client) CheckSourceFreshness(sourceID string) (*pb.CheckSourceFreshness
 	if err != nil {
 		return nil, fmt.Errorf("check source freshness: %w", err)
 	}
-
-	var result pb.CheckSourceFreshnessResponse
-	if err := beprotojson.Unmarshal(resp, &result); err != nil {
-		return nil, fmt.Errorf("parse response: %w", err)
-	}
-	return &result, nil
+	return resp, nil
 }
-*/
 
 func (c *Client) ActOnSources(projectID string, action string, sourceIDs []string) error {
 	_, err := c.rpc.Do(rpc.Call{

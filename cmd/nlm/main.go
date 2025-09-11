@@ -163,6 +163,16 @@ func runCmd(client *api.Client, cmd string, args ...string) error {
 			log.Fatal("usage: nlm rename-source <source-id> <new-name>")
 		}
 		err = renameSource(client, args[0], args[1])
+	case "check-source":
+		if len(args) != 1 {
+			log.Fatal("usage: nlm check-source <source-id>")
+		}
+		err = checkSourceFreshness(client, args[0])
+	case "refresh-source":
+		if len(args) != 1 {
+			log.Fatal("usage: nlm refresh-source <source-id>")
+		}
+		err = refreshSource(client, args[0])
 
 	// Note operations
 	case "new-note":
@@ -429,19 +439,15 @@ func refreshSource(c *api.Client, sourceID string) error {
 	return nil
 }
 
-// func checkSourceFreshness(c *api.Client, sourceID string) error {
-// 	fmt.Fprintf(os.Stderr, "Checking source %s...\n", sourceID)
-// 	resp, err := c.CheckSourceFreshness(sourceID)
-// 	if err != nil {
-// 		return fmt.Errorf("check source: %w", err)
-// 	}
-// 	if resp.NeedsRefresh {
-// 		fmt.Printf("Source needs refresh (last updated: %s)\n", resp.LastUpdateTime.AsTime().Format(time.RFC3339))
-// 	} else {
-// 		fmt.Printf("Source is up to date (last updated: %s)\n", resp.LastUpdateTime.AsTime().Format(time.RFC3339))
-// 	}
-// 	return nil
-// }
+func checkSourceFreshness(c *api.Client, sourceID string) error {
+	fmt.Fprintf(os.Stderr, "Checking source %s...\n", sourceID)
+	resp, err := c.CheckSourceFreshness(sourceID)
+	if err != nil {
+		return fmt.Errorf("check source: %w", err)
+	}
+	fmt.Printf("Source freshness check result: %s\n", string(resp))
+	return nil
+}
 
 // Note operations
 func listNotes(c *api.Client, notebookID string) error {
