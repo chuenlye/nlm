@@ -430,12 +430,28 @@ func removeNote(c *api.Client, notebookID, noteID string) error {
 
 // Source operations
 func refreshSource(c *api.Client, sourceID string) error {
-	fmt.Fprintf(os.Stderr, "Refreshing source %s...\n", sourceID)
+	fmt.Fprintf(os.Stderr, "Triggering Google Drive sync for source %s...\n", sourceID)
 	source, err := c.RefreshSource(sourceID)
 	if err != nil {
 		return fmt.Errorf("refresh source: %w", err)
 	}
-	fmt.Printf("✅ Refreshed source: %s\n", source.Title)
+
+	// Use source title if available, otherwise fall back to source ID
+	displayName := source.Title
+	if displayName == "" {
+		displayName = sourceID
+	}
+
+	fmt.Printf("✅ Sync request sent for source: %s\n", displayName)
+	fmt.Fprintf(os.Stderr, "\nIMPORTANT: NotebookLM sync process notes:\n")
+	fmt.Fprintf(os.Stderr, "• Google Drive sync typically takes 1-3 minutes to complete\n")
+	fmt.Fprintf(os.Stderr, "• Multiple API endpoints were attempted to trigger sync\n")
+	fmt.Fprintf(os.Stderr, "• If sync doesn't work, please report this as a bug\n")
+	fmt.Fprintf(os.Stderr, "\nTo verify sync status:\n")
+	fmt.Fprintf(os.Stderr, "  nlm check-source %s\n", sourceID)
+	fmt.Fprintf(os.Stderr, "\nTo compare with Web UI:\n")
+	fmt.Fprintf(os.Stderr, "  Visit NotebookLM and manually trigger sync to see if behavior differs\n")
+
 	return nil
 }
 
