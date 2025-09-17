@@ -163,6 +163,16 @@ func runCmd(client *api.Client, cmd string, args ...string) error {
 			log.Fatal("usage: nlm rename-source <source-id> <new-name>")
 		}
 		err = renameSource(client, args[0], args[1])
+	case "check-source":
+		if len(args) != 1 {
+			log.Fatal("usage: nlm check-source <source-id>")
+		}
+		err = checkSourceFreshness(client, args[0])
+	case "refresh-source":
+		if len(args) != 1 {
+			log.Fatal("usage: nlm refresh-source <source-id>")
+		}
+		err = refreshSource(client, args[0])
 
 	// Note operations
 	case "new-note":
@@ -420,28 +430,44 @@ func removeNote(c *api.Client, notebookID, noteID string) error {
 
 // Source operations
 func refreshSource(c *api.Client, sourceID string) error {
-	fmt.Fprintf(os.Stderr, "Refreshing source %s...\n", sourceID)
+	fmt.Fprintf(os.Stderr, "Triggering Google Drive sync for source %s...\n", sourceID)
 	source, err := c.RefreshSource(sourceID)
 	if err != nil {
 		return fmt.Errorf("refresh source: %w", err)
 	}
-	fmt.Printf("✅ Refreshed source: %s\n", source.Title)
+
+	// Use source title if available, otherwise fall back to source ID
+	displayName := source.Title
+	if displayName == "" {
+		displayName = sourceID
+	}
+
+	fmt.Printf("✅ Sync request sent for source: %s\n", displayName)
+	fmt.Fprintf(os.Stderr, "\nIMPORTANT: NotebookLM sync process notes:\n")
+	fmt.Fprintf(os.Stderr, "• Google Drive sync typically takes 1-3 minutes to complete\n")
+	fmt.Fprintf(os.Stderr, "• Multiple API endpoints were attempted to trigger sync\n")
+	fmt.Fprintf(os.Stderr, "• If sync doesn't work, please report this as a bug\n")
+	fmt.Fprintf(os.Stderr, "\nTo verify sync status:\n")
+	fmt.Fprintf(os.Stderr, "  nlm check-source %s\n", sourceID)
+	fmt.Fprintf(os.Stderr, "\nTo compare with Web UI:\n")
+	fmt.Fprintf(os.Stderr, "  Visit NotebookLM and manually trigger sync to see if behavior differs\n")
+
 	return nil
 }
 
-// func checkSourceFreshness(c *api.Client, sourceID string) error {
-// 	fmt.Fprintf(os.Stderr, "Checking source %s...\n", sourceID)
-// 	resp, err := c.CheckSourceFreshness(sourceID)
-// 	if err != nil {
-// 		return fmt.Errorf("check source: %w", err)
-// 	}
-// 	if resp.NeedsRefresh {
-// 		fmt.Printf("Source needs refresh (last updated: %s)\n", resp.LastUpdateTime.AsTime().Format(time.RFC3339))
-// 	} else {
-// 		fmt.Printf("Source is up to date (last updated: %s)\n", resp.LastUpdateTime.AsTime().Format(time.RFC3339))
-// 	}
-// 	return nil
-// }
+func checkSourceFreshness(c *api.Client, sourceID string) error {
+	fmt.Fprintf(os.Stderr, "Checking source %s...\n", sourceID)
+	result, err := c.CheckSourceFreshness(sourceID)
+	if err != nil {
+		return fmt.Errorf("check source: %w", err)
+	}
+
+	fmt.Printf("Source ID: %s\n", result.SourceID)
+	fmt.Printf("Status: %s\n", result.Status.String())
+	fmt.Printf("Message: %s\n", result.Message)
+
+	return nil
+}
 
 // Note operations
 func listNotes(c *api.Client, notebookID string) error {

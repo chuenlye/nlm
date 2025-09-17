@@ -108,6 +108,11 @@ func New(authToken, cookies string, options ...batchexecute.Option) *Client {
 			//"rt":    "c",
 		},
 	}
+
+	// Create temporary client to extract debug setting from options
+	tempClient := batchexecute.NewClient(config, options...)
+	config.Debug = tempClient.GetDebug() // We'll need to add this method
+
 	return &Client{
 		Config: config,
 		client: batchexecute.NewClient(config, options...),
@@ -159,6 +164,54 @@ func (c *Client) Do(call Call) (json.RawMessage, error) {
 	}
 
 	return resp.Data, nil
+}
+
+// DoWithFullResponse performs an RPC call and returns the complete response
+// including the raw response array for APIs that need access to non-standard fields
+func (c *Client) DoWithFullResponse(call Call) (*batchexecute.Response, error) {
+	if c.Config.Debug {
+		fmt.Printf("\n=== RPC Call (Full Response) ===\n")
+		fmt.Printf("ID: %s\n", call.ID)
+		fmt.Printf("NotebookID: %s\n", call.NotebookID)
+		fmt.Printf("Args:\n")
+		spew.Dump(call.Args)
+	}
+
+	// Create request-specific URL parameters
+	urlParams := make(map[string]string)
+	for k, v := range c.Config.URLParams {
+		urlParams[k] = v
+	}
+
+	if call.NotebookID != "" {
+		urlParams["source-path"] = "/notebook/" + call.NotebookID
+	} else {
+		urlParams["source-path"] = "/"
+	}
+
+	rpc := batchexecute.RPC{
+		ID:        call.ID,
+		Args:      call.Args,
+		Index:     "generic",
+		URLParams: urlParams,
+	}
+
+	if c.Config.Debug {
+		fmt.Printf("\nRPC Request:\n")
+		spew.Dump(rpc)
+	}
+
+	resp, err := c.client.Do(rpc)
+	if err != nil {
+		return nil, fmt.Errorf("execute rpc: %w", err)
+	}
+
+	if c.Config.Debug {
+		fmt.Printf("\nRPC Full Response:\n")
+		spew.Dump(resp)
+	}
+
+	return resp, nil
 }
 
 // Heartbeat sends a heartbeat to keep the session alive
