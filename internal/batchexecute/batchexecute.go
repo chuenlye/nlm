@@ -551,6 +551,11 @@ type Client struct {
 	reqid      *ReqIDGenerator
 }
 
+// GetDebug returns the debug flag setting
+func (c *Client) GetDebug() bool {
+	return c.config.Debug
+}
+
 // NewClient creates a new batchexecute client
 func NewClient(config Config, opts ...Option) *Client {
 	c := &Client{

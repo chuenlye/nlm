@@ -108,6 +108,11 @@ func New(authToken, cookies string, options ...batchexecute.Option) *Client {
 			//"rt":    "c",
 		},
 	}
+
+	// Create temporary client to extract debug setting from options
+	tempClient := batchexecute.NewClient(config, options...)
+	config.Debug = tempClient.GetDebug() // We'll need to add this method
+
 	return &Client{
 		Config: config,
 		client: batchexecute.NewClient(config, options...),
