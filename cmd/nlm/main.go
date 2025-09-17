@@ -441,11 +441,15 @@ func refreshSource(c *api.Client, sourceID string) error {
 
 func checkSourceFreshness(c *api.Client, sourceID string) error {
 	fmt.Fprintf(os.Stderr, "Checking source %s...\n", sourceID)
-	resp, err := c.CheckSourceFreshness(sourceID)
+	result, err := c.CheckSourceFreshness(sourceID)
 	if err != nil {
 		return fmt.Errorf("check source: %w", err)
 	}
-	fmt.Printf("Source freshness check result: %s\n", string(resp))
+
+	fmt.Printf("Source ID: %s\n", result.SourceID)
+	fmt.Printf("Status: %s\n", result.Status.String())
+	fmt.Printf("Message: %s\n", result.Message)
+
 	return nil
 }
 

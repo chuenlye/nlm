@@ -33,6 +33,9 @@ type Response struct {
 	ID    string          `json:"id"`
 	Data  json.RawMessage `json:"data"`
 	Error string          `json:"error"`
+	// RawArray preserves the entire response array for APIs that need access
+	// to non-standard response fields (e.g., CheckSourceFreshness uses position [5])
+	RawArray []interface{} `json:"-"`
 }
 
 // BatchExecuteError represents a batchexecute error
@@ -225,7 +228,8 @@ func decodeResponse(raw string) ([]Response, error) {
 
 		id, _ := rpcData[1].(string)
 		resp := Response{
-			ID: id,
+			ID:       id,
+			RawArray: rpcData, // Preserve the entire response array
 		}
 
 		if rpcData[2] != nil {
@@ -369,7 +373,8 @@ func decodeChunkedResponse(raw string) ([]Response, error) {
 
 			id, _ := rpcData[1].(string)
 			resp := Response{
-				ID: id,
+				ID:       id,
+				RawArray: rpcData, // Preserve the entire response array in chunked responses too
 			}
 
 			// Handle data - use string directly to avoid double escaping

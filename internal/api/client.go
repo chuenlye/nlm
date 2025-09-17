@@ -18,6 +18,14 @@ import (
 	"github.com/tmc/nlm/internal/rpc"
 )
 
+// Time threshold constants for Google Drive sync analysis
+const (
+	// TenDaysInSeconds represents 10 days in seconds (864000 seconds)
+	TenDaysInSeconds = 10 * 24 * 60 * 60
+	// OneDayInSeconds represents 1 day in seconds (86400 seconds)
+	OneDayInSeconds = 24 * 60 * 60
+)
+
 type Notebook = pb.Project
 type Note = pb.Source
 
@@ -213,7 +221,8 @@ func (c *Client) RefreshSource(sourceID string) (*pb.Source, error) {
 }
 
 func (c *Client) LoadSource(sourceID string) (*pb.Source, error) {
-	resp, err := c.rpc.Do(rpc.Call{
+	// Use DoWithFullResponse to get both parsed data and raw response for debugging
+	fullResp, err := c.rpc.DoWithFullResponse(rpc.Call{
 		ID:   rpc.RPCLoadSource,
 		Args: []interface{}{sourceID},
 	})
@@ -221,22 +230,326 @@ func (c *Client) LoadSource(sourceID string) (*pb.Source, error) {
 		return nil, fmt.Errorf("load source: %w", err)
 	}
 
+	if c.rpc.Config.Debug {
+		fmt.Printf("=== LoadSource Raw Response for %s ===\n", sourceID)
+		fmt.Printf("RawArray length: %d\n", len(fullResp.RawArray))
+		if len(fullResp.RawArray) > 0 {
+			for i, item := range fullResp.RawArray {
+				fmt.Printf("  [%d]: %v (type: %T)\n", i, item, item)
+			}
+		}
+		fmt.Printf("Raw JSON Data: %s\n", string(fullResp.Data))
+		fmt.Printf("==========================================\n")
+	}
+
 	var source pb.Source
-	if err := beprotojson.Unmarshal(resp, &source); err != nil {
+	if err := beprotojson.Unmarshal(fullResp.Data, &source); err != nil {
 		return nil, fmt.Errorf("parse response: %w", err)
 	}
+
+	if c.rpc.Config.Debug {
+		fmt.Printf("=== Parsed Source Metadata ===\n")
+		if source.SourceId != nil {
+			fmt.Printf("Source ID: %s\n", source.SourceId.SourceId)
+		}
+		fmt.Printf("Title: %s\n", source.Title)
+		if source.Metadata != nil {
+			fmt.Printf("Source Type: %s\n", source.Metadata.SourceType.String())
+			if gdMeta := source.Metadata.GetGoogleDocs(); gdMeta != nil {
+				fmt.Printf("Google Docs Document ID: %s\n", gdMeta.DocumentId)
+			}
+		}
+		if source.Settings != nil {
+			fmt.Printf("Source Status: %s\n", source.Settings.Status.String())
+		}
+		fmt.Printf("==============================\n")
+	}
+
 	return &source, nil
 }
 
-func (c *Client) CheckSourceFreshness(sourceID string) ([]byte, error) {
-	resp, err := c.rpc.Do(rpc.Call{
-		ID:   rpc.RPCCheckSourceFreshness,
-		Args: []interface{}{sourceID},
+// SourceFreshnessResult represents the result of a source freshness check
+type SourceFreshnessResult struct {
+	SourceID string
+	Status   pb.SourceSettings_SourceStatus
+	Message  string
+}
+
+func (c *Client) CheckSourceFreshness(sourceID string) (*SourceFreshnessResult, error) {
+	result := &SourceFreshnessResult{
+		SourceID: sourceID,
+	}
+
+	// INSIGHT: CheckSourceFreshness API consistently returns [3] for all sources,
+	// regardless of their sync status. This suggests it's not the right API for
+	// determining Google Drive sync status.
+	//
+	// Instead, we'll analyze the source metadata from the project listing
+	// to determine sync status based on the presence and structure of Google Drive metadata.
+
+	return c.checkSourceSyncStatus(sourceID, result)
+}
+
+func (c *Client) checkSourceSyncStatus(sourceID string, result *SourceFreshnessResult) (*SourceFreshnessResult, error) {
+	// Get raw project data to analyze source sync status directly from API response
+	// This bypasses protobuf parsing issues and analyzes the raw JSON structure
+
+	resp, err := c.rpc.DoWithFullResponse(rpc.Call{
+		ID:   rpc.RPCListRecentlyViewedProjects,
+		Args: []interface{}{nil, 1},
 	})
 	if err != nil {
-		return nil, fmt.Errorf("check source freshness: %w", err)
+		result.Status = pb.SourceSettings_SOURCE_STATUS_ERROR
+		result.Message = fmt.Sprintf("Failed to get projects data: %v", err)
+		return result, nil
 	}
-	return resp, nil
+
+	// Parse the raw response to find our source
+	var responseData []interface{}
+	if err := json.Unmarshal(resp.Data, &responseData); err != nil {
+		result.Status = pb.SourceSettings_SOURCE_STATUS_ERROR
+		result.Message = fmt.Sprintf("Failed to parse projects response: %v", err)
+		return result, nil
+	}
+
+	// Search through projects in the raw response
+	if len(responseData) > 0 {
+		if projects, ok := responseData[0].([]interface{}); ok {
+			for _, projectData := range projects {
+				if project, ok := projectData.([]interface{}); ok && len(project) > 1 {
+					// project[0] = title, project[1] = sources array
+					if sourcesData, ok := project[1].([]interface{}); ok {
+						for _, sourceData := range sourcesData {
+							if sourceArr, ok := sourceData.([]interface{}); ok && len(sourceArr) > 2 {
+								// sourceArr[0] = [sourceID], sourceArr[1] = title, sourceArr[2] = metadata
+								if sourceIDArr, ok := sourceArr[0].([]interface{}); ok && len(sourceIDArr) > 0 {
+									if sourceIDStr, ok := sourceIDArr[0].(string); ok && sourceIDStr == sourceID {
+										// Found our source - analyze its metadata structure
+										return c.analyzeRawSourceStructure(sourceArr, result)
+									}
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
+	result.Status = pb.SourceSettings_SOURCE_STATUS_ERROR
+	result.Message = "Source not found in any project"
+	return result, nil
+}
+
+func (c *Client) extractSourceTitle(sourceArr []interface{}) string {
+	if title, ok := sourceArr[1].(string); ok {
+		return title
+	}
+	return "Unknown Source"
+}
+
+func (c *Client) debugSourceStructure(sourceTitle string, sourceArr []interface{}) {
+	if !c.rpc.Config.Debug {
+		return
+	}
+	fmt.Printf("=== Detailed Source Analysis ===\n")
+	fmt.Printf("Source Title: %s\n", sourceTitle)
+	fmt.Printf("Full source array length: %d\n", len(sourceArr))
+	for i, elem := range sourceArr {
+		fmt.Printf("Position [%d]: %T = %+v\n", i, elem, elem)
+	}
+	fmt.Printf("==============================\n")
+}
+
+func (c *Client) debugMetadata(metadataArr []interface{}) {
+	if !c.rpc.Config.Debug {
+		return
+	}
+	fmt.Printf("Metadata array length: %d\n", len(metadataArr))
+	for i, elem := range metadataArr {
+		fmt.Printf("Metadata [%d]: %T = %+v\n", i, elem, elem)
+	}
+}
+
+func (c *Client) isGoogleDriveSource(metadataArr []interface{}) bool {
+	if metadataArr[0] == nil {
+		return false
+	}
+	googleDriveInfo, ok := metadataArr[0].([]interface{})
+	return ok && len(googleDriveInfo) >= 1
+}
+
+func (c *Client) setRegularSourceStatus(result *SourceFreshnessResult, sourceTitle string) *SourceFreshnessResult {
+	result.Status = pb.SourceSettings_SOURCE_STATUS_ENABLED
+	if sourceTitle != "Unknown Source" {
+		result.Message = fmt.Sprintf("Source (%s) is functioning normally", sourceTitle)
+	} else {
+		result.Message = "Source is functioning normally"
+	}
+	return result
+}
+
+func (c *Client) analyzeGoogleDriveSync(metadataArr []interface{}, result *SourceFreshnessResult) (*SourceFreshnessResult, error) {
+	if c.rpc.Config.Debug {
+		fmt.Printf("Google Drive source detected. Metadata array length: %d\n", len(metadataArr))
+	}
+
+	switch len(metadataArr) {
+	case 7:
+		return c.analyzeLength7Metadata(metadataArr, result)
+	case 6:
+		return c.analyzeLength6Metadata(metadataArr, result)
+	case 5:
+		return c.analyzeLength5Metadata(metadataArr, result)
+	default:
+		result.Status = pb.SourceSettings_SOURCE_STATUS_ENABLED
+		result.Message = "Google Drive source is properly synchronized"
+		return result, nil
+	}
+}
+
+func (c *Client) analyzeLength7Metadata(metadataArr []interface{}, result *SourceFreshnessResult) (*SourceFreshnessResult, error) {
+	if len(metadataArr) > 5 && metadataArr[5] == nil {
+		result.Status = pb.SourceSettings_SOURCE_STATUS_DISABLED
+		result.Message = "Google Drive source needs synchronization (クリックして Google ドライブと同期)"
+	} else {
+		result.Status = pb.SourceSettings_SOURCE_STATUS_ENABLED
+		result.Message = "Google Drive source is properly synchronized"
+	}
+	return result, nil
+}
+
+func (c *Client) analyzeLength6Metadata(metadataArr []interface{}, result *SourceFreshnessResult) (*SourceFreshnessResult, error) {
+	if len(metadataArr) <= 5 {
+		result.Status = pb.SourceSettings_SOURCE_STATUS_DISABLED
+		result.Message = "Google Drive source needs synchronization (クリックして Google ドライブと同期)"
+		return result, nil
+	}
+
+	if c.rpc.Config.Debug {
+		fmt.Printf("Length 6 source - Position [5]: %+v\n", metadataArr[5])
+	}
+
+	if syncFlag, ok := metadataArr[5].(float64); ok && syncFlag == 1 {
+		result.Status = pb.SourceSettings_SOURCE_STATUS_ENABLED
+		result.Message = "Google Drive source is properly synchronized"
+	} else {
+		result.Status = pb.SourceSettings_SOURCE_STATUS_DISABLED
+		result.Message = "Google Drive source needs synchronization (クリックして Google ドライブと同期)"
+	}
+	return result, nil
+}
+
+func (c *Client) analyzeLength5Metadata(metadataArr []interface{}, result *SourceFreshnessResult) (*SourceFreshnessResult, error) {
+	if c.rpc.Config.Debug {
+		fmt.Printf("Length 5 source - Position [4]: %+v\n", metadataArr[4])
+	}
+
+	if syncFlag, ok := metadataArr[4].(float64); ok && syncFlag == 1 {
+		return c.analyzeTimestampDifference(metadataArr, result, true)
+	}
+	return c.analyzeTimestampDifference(metadataArr, result, false)
+}
+
+func (c *Client) analyzeTimestampDifference(metadataArr []interface{}, result *SourceFreshnessResult, hasPositionFlag bool) (*SourceFreshnessResult, error) {
+	lastUpdate, creation := c.extractTimestamps(metadataArr)
+
+	if c.rpc.Config.Debug {
+		if hasPositionFlag {
+			fmt.Printf("Length 5 source with position [4] = 1 - Creation: %d, LastUpdate: %d, Diff: %d\n", creation, lastUpdate, lastUpdate-creation)
+		} else {
+			fmt.Printf("Length 5 source - Creation: %d, LastUpdate: %d\n", creation, lastUpdate)
+		}
+	}
+
+	if hasPositionFlag {
+		// For sources with position [4] = 1, smaller time differences need sync
+		if lastUpdate > creation && (lastUpdate-creation) < TenDaysInSeconds {
+			result.Status = pb.SourceSettings_SOURCE_STATUS_DISABLED
+			result.Message = "Google Drive source needs synchronization (クリックして Google ドライブと同期)"
+		} else {
+			result.Status = pb.SourceSettings_SOURCE_STATUS_ENABLED
+			result.Message = "Google Drive source is properly synchronized"
+		}
+	} else {
+		// Counter-intuitive logic based on user feedback
+		if lastUpdate > creation && (lastUpdate-creation) > OneDayInSeconds {
+			result.Status = pb.SourceSettings_SOURCE_STATUS_DISABLED
+			result.Message = "Google Drive source needs synchronization (クリックして Google ドライブと同期)"
+		} else {
+			result.Status = pb.SourceSettings_SOURCE_STATUS_ENABLED
+			result.Message = "Google Drive source is properly synchronized"
+		}
+	}
+	return result, nil
+}
+
+func (c *Client) extractTimestamps(metadataArr []interface{}) (lastUpdate, creation int64) {
+	// Extract timestamps from position [3] and [2]
+	if timestampArr, ok := metadataArr[3].([]interface{}); ok && len(timestampArr) >= 2 {
+		if ts, ok := timestampArr[1].([]interface{}); ok && len(ts) >= 1 {
+			if val, ok := ts[0].(float64); ok {
+				lastUpdate = int64(val)
+			}
+		}
+	}
+	if timestampArr, ok := metadataArr[2].([]interface{}); ok && len(timestampArr) >= 1 {
+		if val, ok := timestampArr[0].(float64); ok {
+			creation = int64(val)
+		}
+	}
+	return
+}
+
+func (c *Client) analyzeRawSourceStructure(sourceArr []interface{}, result *SourceFreshnessResult) (*SourceFreshnessResult, error) {
+	if len(sourceArr) < 4 {
+		result.Status = pb.SourceSettings_SOURCE_STATUS_ERROR
+		result.Message = "Invalid source structure"
+		return result, nil
+	}
+
+	sourceTitle := c.extractSourceTitle(sourceArr)
+	c.debugSourceStructure(sourceTitle, sourceArr)
+
+	metadataArr, ok := sourceArr[2].([]interface{})
+	if !ok || len(metadataArr) == 0 {
+		return c.setRegularSourceStatus(result, sourceTitle), nil
+	}
+
+	c.debugMetadata(metadataArr)
+
+	if !c.isGoogleDriveSource(metadataArr) {
+		return c.setRegularSourceStatus(result, sourceTitle), nil
+	}
+
+	finalResult, err := c.analyzeGoogleDriveSync(metadataArr, result)
+	if err != nil {
+		return finalResult, err
+	}
+
+	// Add final debug output
+	if c.rpc.Config.Debug {
+		fmt.Printf("=== Final Analysis ===\n")
+		fmt.Printf("Source Title: %s\n", sourceTitle)
+		fmt.Printf("Final Status: %s\n", finalResult.Status.String())
+		fmt.Printf("Final Message: %s\n", finalResult.Message)
+		fmt.Printf("====================\n")
+	}
+
+	return finalResult, nil
+}
+
+func (c *Client) getStatusMessage(status pb.SourceSettings_SourceStatus) string {
+	switch status {
+	case pb.SourceSettings_SOURCE_STATUS_ENABLED:
+		return "Source is up to date and available"
+	case pb.SourceSettings_SOURCE_STATUS_DISABLED:
+		return "Source is disabled"
+	case pb.SourceSettings_SOURCE_STATUS_ERROR:
+		return "Source has errors and may need to be refreshed"
+	default:
+		return "Source status unknown"
+	}
 }
 
 func (c *Client) ActOnSources(projectID string, action string, sourceIDs []string) error {
