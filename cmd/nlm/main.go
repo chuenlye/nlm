@@ -44,8 +44,9 @@ func main() {
 		fmt.Fprintf(os.Stderr, "  add <id> <input>  Add source to notebook\n")
 		fmt.Fprintf(os.Stderr, "  rm-source <id> <source-id>  Remove source\n")
 		fmt.Fprintf(os.Stderr, "  rename-source <source-id> <new-name>  Rename source\n")
-		fmt.Fprintf(os.Stderr, "  refresh-source <source-id>  Refresh source content\n")
-		fmt.Fprintf(os.Stderr, "  check-source <source-id>  Check source freshness\n\n")
+		fmt.Fprintf(os.Stderr, "  check-source <notebook-id> <source-id>  Check source freshness\n")
+		fmt.Fprintf(os.Stderr, "  refresh-source <notebook-id> <source-id>  Refresh source content\n")
+		fmt.Fprintf(os.Stderr, "  batch-sync <notebook-id> [--google-docs-only] [--force]  Batch sync sources\n\n")
 
 		fmt.Fprintf(os.Stderr, "Note Commands:\n")
 		fmt.Fprintf(os.Stderr, "  notes <id>        List notes in notebook\n")
@@ -164,15 +165,36 @@ func runCmd(client *api.Client, cmd string, args ...string) error {
 		}
 		err = renameSource(client, args[0], args[1])
 	case "check-source":
-		if len(args) != 1 {
-			log.Fatal("usage: nlm check-source <source-id>")
+		if len(args) != 2 {
+			log.Fatal("usage: nlm check-source <notebook-id> <source-id>")
 		}
-		err = checkSourceFreshness(client, args[0])
+		err = checkSourceFreshness(client, args[0], args[1])
 	case "refresh-source":
-		if len(args) != 1 {
-			log.Fatal("usage: nlm refresh-source <source-id>")
+		if len(args) != 2 {
+			log.Fatal("usage: nlm refresh-source <notebook-id> <source-id>")
 		}
-		err = refreshSource(client, args[0])
+		err = refreshSource(client, args[0], args[1])
+	case "batch-sync":
+		if len(args) < 1 || len(args) > 3 {
+			log.Fatal("usage: nlm batch-sync <notebook-id> [--google-docs-only] [--force]")
+		}
+		notebookID := args[0]
+		googleDocsOnly := false
+		force := false
+
+		// Parse flags
+		for i := 1; i < len(args); i++ {
+			switch args[i] {
+			case "--google-docs-only":
+				googleDocsOnly = true
+			case "--force":
+				force = true
+			default:
+				log.Fatal("usage: nlm batch-sync <notebook-id> [--google-docs-only] [--force]")
+			}
+		}
+
+		err = batchSync(client, notebookID, googleDocsOnly, force)
 
 	// Note operations
 	case "new-note":
@@ -429,9 +451,9 @@ func removeNote(c *api.Client, notebookID, noteID string) error {
 }
 
 // Source operations
-func refreshSource(c *api.Client, sourceID string) error {
-	fmt.Fprintf(os.Stderr, "Triggering Google Drive sync for source %s...\n", sourceID)
-	source, err := c.RefreshSource(sourceID)
+func refreshSource(c *api.Client, notebookID, sourceID string) error {
+	fmt.Fprintf(os.Stderr, "Triggering Google Drive sync for source %s in notebook %s...\n", sourceID, notebookID)
+	source, err := c.RefreshSource(notebookID, sourceID)
 	if err != nil {
 		return fmt.Errorf("refresh source: %w", err)
 	}
@@ -448,16 +470,16 @@ func refreshSource(c *api.Client, sourceID string) error {
 	fmt.Fprintf(os.Stderr, "• Multiple API endpoints were attempted to trigger sync\n")
 	fmt.Fprintf(os.Stderr, "• If sync doesn't work, please report this as a bug\n")
 	fmt.Fprintf(os.Stderr, "\nTo verify sync status:\n")
-	fmt.Fprintf(os.Stderr, "  nlm check-source %s\n", sourceID)
+	fmt.Fprintf(os.Stderr, "  nlm check-source %s %s\n", notebookID, sourceID)
 	fmt.Fprintf(os.Stderr, "\nTo compare with Web UI:\n")
 	fmt.Fprintf(os.Stderr, "  Visit NotebookLM and manually trigger sync to see if behavior differs\n")
 
 	return nil
 }
 
-func checkSourceFreshness(c *api.Client, sourceID string) error {
-	fmt.Fprintf(os.Stderr, "Checking source %s...\n", sourceID)
-	result, err := c.CheckSourceFreshness(sourceID)
+func checkSourceFreshness(c *api.Client, notebookID, sourceID string) error {
+	fmt.Fprintf(os.Stderr, "Checking source %s in notebook %s...\n", sourceID, notebookID)
+	result, err := c.CheckSourceFreshness(notebookID, sourceID)
 	if err != nil {
 		return fmt.Errorf("check source: %w", err)
 	}
@@ -465,6 +487,80 @@ func checkSourceFreshness(c *api.Client, sourceID string) error {
 	fmt.Printf("Source ID: %s\n", result.SourceID)
 	fmt.Printf("Status: %s\n", result.Status.String())
 	fmt.Printf("Message: %s\n", result.Message)
+
+	return nil
+}
+
+// batchSync performs batch synchronization of sources in a notebook
+func batchSync(c *api.Client, notebookID string, googleDocsOnly bool, force bool) error {
+	fmt.Fprintf(os.Stderr, "Starting batch sync for notebook %s...\n", notebookID)
+	if googleDocsOnly {
+		fmt.Fprintf(os.Stderr, "Filter: Google Docs sources only\n")
+	}
+	if force {
+		fmt.Fprintf(os.Stderr, "Mode: Force sync (skip freshness checks)\n")
+	}
+	fmt.Fprintf(os.Stderr, "\n")
+
+	result, err := c.BatchSync(notebookID, googleDocsOnly, force)
+	if err != nil {
+		return fmt.Errorf("batch sync failed: %w", err)
+	}
+
+	// Display results
+	fmt.Printf("📊 Batch Sync Summary\n")
+	fmt.Printf("═════════════════════\n")
+	fmt.Printf("Total Sources: %d\n", result.TotalSources)
+	fmt.Printf("✅ Synced: %d\n", result.SyncedSources)
+	fmt.Printf("❌ Failed: %d\n", result.FailedSources)
+	fmt.Printf("⏭️  Skipped: %d\n", result.SkippedSources)
+	fmt.Printf("\n")
+
+	// Display detailed results
+	if len(result.Results) > 0 {
+		fmt.Printf("📋 Detailed Results\n")
+		fmt.Printf("═══════════════════\n")
+
+		w := tabwriter.NewWriter(os.Stdout, 0, 4, 4, ' ', 0)
+		fmt.Fprintln(w, "STATUS\tSOURCE\tMESSAGE")
+		fmt.Fprintln(w, "──────\t──────\t───────")
+
+		for _, srcResult := range result.Results {
+			statusIcon := "❓"
+			switch srcResult.Status {
+			case "SYNCED":
+				statusIcon = "✅"
+			case "FAILED":
+				statusIcon = "❌"
+			case "SKIPPED":
+				statusIcon = "⏭️"
+			case "NOT_NEEDED":
+				statusIcon = "✓"
+			}
+
+			sourceName := srcResult.SourceTitle
+			if sourceName == "" {
+				sourceName = srcResult.SourceID
+			}
+
+			fmt.Fprintf(w, "%s %s\t%s\t%s\n", statusIcon, srcResult.Status, sourceName, srcResult.Message)
+		}
+
+		w.Flush()
+	}
+
+	// Show recommendations
+	if result.FailedSources > 0 {
+		fmt.Fprintf(os.Stderr, "\n💡 Recommendations:\n")
+		fmt.Fprintf(os.Stderr, "• Check individual sources with: nlm check-source <notebook-id> <source-id>\n")
+		fmt.Fprintf(os.Stderr, "• Try manual refresh with: nlm refresh-source <notebook-id> <source-id>\n")
+		fmt.Fprintf(os.Stderr, "• Use --force to skip freshness checks\n")
+	}
+
+	if result.SyncedSources > 0 {
+		fmt.Fprintf(os.Stderr, "\n⏳ Note: Google Drive sync typically takes 1-3 minutes to complete\n")
+		fmt.Fprintf(os.Stderr, "You can check sync status later with individual check-source commands\n")
+	}
 
 	return nil
 }

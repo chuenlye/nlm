@@ -205,13 +205,7 @@ func (c *Client) MutateSource(sourceID string, updates *pb.Source) (*pb.Source, 
 	return &source, nil
 }
 
-func (c *Client) RefreshSource(sourceID string) (*pb.Source, error) {
-	// Try to find project ID first
-	projectID, err := c.findProjectIDForSource(sourceID)
-	if err != nil {
-		return nil, fmt.Errorf("could not find project for source %s: %w", sourceID, err)
-	}
-
+func (c *Client) RefreshSource(projectID, sourceID string) (*pb.Source, error) {
 	if c.rpc.Config.Debug {
 		fmt.Printf("Refreshing source %s in project %s\n", sourceID, projectID)
 	}
@@ -286,6 +280,117 @@ func (c *Client) RefreshSource(sourceID string) (*pb.Source, error) {
 	return &source, nil
 }
 
+// BatchSyncResult represents the result of batch sync operation
+type BatchSyncResult struct {
+	TotalSources    int
+	SyncedSources   int
+	FailedSources   int
+	SkippedSources  int
+	Results         []SourceSyncResult
+}
+
+// SourceSyncResult represents the sync result for a single source
+type SourceSyncResult struct {
+	SourceID    string
+	SourceTitle string
+	Status      string // "SYNCED", "FAILED", "SKIPPED", "NOT_NEEDED"
+	Message     string
+}
+
+// BatchSync performs batch synchronization for all Google Docs sources in a notebook
+func (c *Client) BatchSync(projectID string, googleDocsOnly bool, force bool) (*BatchSyncResult, error) {
+	if c.rpc.Config.Debug {
+		fmt.Printf("=== BatchSync called ===\n")
+		fmt.Printf("Project ID: %s\n", projectID)
+		fmt.Printf("Google Docs Only: %v\n", googleDocsOnly)
+		fmt.Printf("Force: %v\n", force)
+	}
+
+	result := &BatchSyncResult{
+		Results: make([]SourceSyncResult, 0),
+	}
+
+	// Get project details to access sources
+	project, err := c.GetProject(projectID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get project: %w", err)
+	}
+
+	result.TotalSources = len(project.Sources)
+	if c.rpc.Config.Debug {
+		fmt.Printf("Found %d sources in project\n", result.TotalSources)
+	}
+
+	// Process each source
+	for _, source := range project.Sources {
+		sourceID := source.SourceId.GetSourceId()
+		sourceTitle := source.Title
+
+		if c.rpc.Config.Debug {
+			fmt.Printf("\n--- Processing source: %s (%s) ---\n", sourceTitle, sourceID)
+		}
+
+		syncResult := SourceSyncResult{
+			SourceID:    sourceID,
+			SourceTitle: sourceTitle,
+		}
+
+		// Filter Google Docs sources if requested
+		if googleDocsOnly {
+			if source.Metadata == nil || source.Metadata.SourceType != pb.SourceType_SOURCE_TYPE_GOOGLE_DOCS {
+				syncResult.Status = "SKIPPED"
+				syncResult.Message = "Not a Google Docs source"
+				result.Results = append(result.Results, syncResult)
+				result.SkippedSources++
+				continue
+			}
+		}
+
+		// Check if sync is needed (unless forced)
+		if !force {
+			freshnessResult, err := c.CheckSourceFreshness(projectID, sourceID)
+			if err != nil {
+				syncResult.Status = "FAILED"
+				syncResult.Message = fmt.Sprintf("Failed to check freshness: %v", err)
+				result.Results = append(result.Results, syncResult)
+				result.FailedSources++
+				continue
+			}
+
+			// Skip if source is already synchronized
+			if freshnessResult.Status == pb.SourceSettings_SOURCE_STATUS_ENABLED {
+				syncResult.Status = "NOT_NEEDED"
+				syncResult.Message = "Source already synchronized"
+				result.Results = append(result.Results, syncResult)
+				result.SkippedSources++
+				continue
+			}
+		}
+
+		// Perform sync
+		_, err = c.RefreshSource(projectID, sourceID)
+		if err != nil {
+			syncResult.Status = "FAILED"
+			syncResult.Message = fmt.Sprintf("Sync failed: %v", err)
+			result.Results = append(result.Results, syncResult)
+			result.FailedSources++
+		} else {
+			syncResult.Status = "SYNCED"
+			syncResult.Message = "Sync request sent successfully"
+			result.Results = append(result.Results, syncResult)
+			result.SyncedSources++
+		}
+	}
+
+	if c.rpc.Config.Debug {
+		fmt.Printf("\n=== BatchSync Summary ===\n")
+		fmt.Printf("Total: %d, Synced: %d, Failed: %d, Skipped: %d\n",
+			result.TotalSources, result.SyncedSources, result.FailedSources, result.SkippedSources)
+	}
+
+	return result, nil
+}
+
 func (c *Client) LoadSource(sourceID string) (*pb.Source, error) {
 	// Use DoWithFullResponse to get both parsed data and raw response for debugging
 	fullResp, err := c.rpc.DoWithFullResponse(rpc.Call{
@@ -341,51 +446,13 @@ type SourceFreshnessResult struct {
 	Message  string
 }
 
-func (c *Client) CheckSourceFreshness(sourceID string) (*SourceFreshnessResult, error) {
-	fmt.Printf("=== CheckSourceFreshness called with sourceID: %s ===\n", sourceID)
-	fmt.Printf("Debug flag: %v\n", c.rpc.Config.Debug)
+func (c *Client) CheckSourceFreshness(projectID, sourceID string) (*SourceFreshnessResult, error) {
+	if c.rpc.Config.Debug {
+		fmt.Printf("=== CheckSourceFreshness called with projectID: %s, sourceID: %s ===\n", projectID, sourceID)
+	}
 
 	result := &SourceFreshnessResult{
 		SourceID: sourceID,
-	}
-
-	// Try HTML-based detection first (more reliable and direct)
-	// TEMPORARILY DISABLED FOR TESTING METADATA LOGIC
-	/*
-	if c.rpc.Config.Debug {
-		fmt.Printf("Attempting HTML-based sync status detection for source %s...\n", sourceID)
-	}
-
-	if htmlResult, err := c.checkSourceStatusFromHTML(sourceID, result); err == nil {
-		if c.rpc.Config.Debug {
-			fmt.Printf("HTML-based detection succeeded, status: %v\n", htmlResult.Status)
-		}
-		return htmlResult, nil
-	} else {
-		if c.rpc.Config.Debug {
-			fmt.Printf("HTML-based detection failed: %v\n", err)
-		}
-	}
-	*/
-
-	// Fall back to API metadata analysis if HTML method fails
-	if c.rpc.Config.Debug {
-		fmt.Printf("Falling back to API metadata analysis...\n")
-	}
-	return c.checkSourceSyncStatus(sourceID, result)
-}
-
-func (c *Client) checkSourceSyncStatus(sourceID string, result *SourceFreshnessResult) (*SourceFreshnessResult, error) {
-	// First, find which project contains this source
-	projectID, err := c.findProjectIDForSource(sourceID)
-	if err != nil {
-		result.Status = pb.SourceSettings_SOURCE_STATUS_ERROR
-		result.Message = fmt.Sprintf("Could not find project for source: %v", err)
-		return result, nil
-	}
-
-	if c.rpc.Config.Debug {
-		fmt.Printf("Found source %s in project %s\n", sourceID, projectID)
 	}
 
 	// Use CheckSourceFreshness API to get the sync status
@@ -420,31 +487,7 @@ func (c *Client) checkSourceSyncStatus(sourceID string, result *SourceFreshnessR
 }
 
 
-func (c *Client) findProjectIDForSource(sourceID string) (string, error) {
-	// Try to get all projects and search through them to find which contains this source
-	resp, err := c.rpc.DoWithFullResponse(rpc.Call{
-		ID:   rpc.RPCListRecentlyViewedProjects,
-		Args: []interface{}{nil, 50}, // Increase limit to find all projects
-	})
-	if err != nil {
-		return "", fmt.Errorf("failed to get projects: %w", err)
-	}
 
-	if c.rpc.Config.Debug {
-		fmt.Printf("ListRecentlyViewedProjects response:\n%s\n", string(resp.Data))
-		fmt.Printf("RawArray: %+v\n", resp.RawArray)
-	}
-
-	// If no projects found in recent list, try the known project ID as fallback
-	// This is a temporary workaround until we find the proper project discovery method
-	knownProjectID := "3122efef-6516-495a-8eec-c46a575e7622"
-
-	if c.rpc.Config.Debug {
-		fmt.Printf("Fallback to known project ID for investigation: %s\n", knownProjectID)
-	}
-
-	return knownProjectID, nil
-}
 
 func (c *Client) interpretFreshnessStatusCode(statusCode int, sourceID string, result *SourceFreshnessResult) (*SourceFreshnessResult, error) {
 	if c.rpc.Config.Debug {
@@ -476,44 +519,6 @@ func (c *Client) interpretFreshnessStatusCode(statusCode int, sourceID string, r
 	return result, nil
 }
 
-func (c *Client) tryLoadSourceForSyncStatus(sourceID string, statusCode int, result *SourceFreshnessResult) (*SourceFreshnessResult, error) {
-	if c.rpc.Config.Debug {
-		fmt.Printf("Trying LoadSource API for detailed sync status information...\n")
-	}
-
-	// Try to get the project ID first
-	projectID, err := c.findProjectIDForSource(sourceID)
-	if err != nil {
-		if c.rpc.Config.Debug {
-			fmt.Printf("Could not find project for LoadSource: %v\n", err)
-		}
-		// Fall back to generic status code interpretation
-		return c.genericStatusCodeInterpretation(statusCode, result), nil
-	}
-
-	// Call LoadSource API to get detailed source information
-	resp, err := c.rpc.DoWithFullResponse(rpc.Call{
-		ID:         rpc.RPCLoadSource,
-		NotebookID: projectID,
-		Args:       []interface{}{sourceID},
-	})
-	if err != nil {
-		if c.rpc.Config.Debug {
-			fmt.Printf("LoadSource API failed: %v\n", err)
-		}
-		// Fall back to generic status code interpretation
-		return c.genericStatusCodeInterpretation(statusCode, result), nil
-	}
-
-	if c.rpc.Config.Debug {
-		fmt.Printf("LoadSource API response:\n%s\n", string(resp.Data))
-		fmt.Printf("LoadSource RawArray: %+v\n", resp.RawArray)
-	}
-
-	// TODO: Analyze LoadSource response for sync status indicators
-	// For now, fall back to generic interpretation
-	return c.genericStatusCodeInterpretation(statusCode, result), nil
-}
 
 func (c *Client) genericStatusCodeInterpretation(statusCode int, result *SourceFreshnessResult) *SourceFreshnessResult {
 	switch statusCode {
@@ -758,225 +763,8 @@ func (c *Client) extractTimestamps(metadataArr []interface{}) (lastUpdate, creat
 	return
 }
 
-// checkSourceStatusFromHTML checks source sync status by parsing the NotebookLM web UI
-func (c *Client) checkSourceStatusFromHTML(sourceID string, result *SourceFreshnessResult) (*SourceFreshnessResult, error) {
-	if c.rpc.Config.Debug {
-		fmt.Printf("Starting HTML-based sync status check for source %s\n", sourceID)
-	}
 
-	// First, find which project contains this source
-	projectID, err := c.findProjectContainingSource(sourceID)
-	if err != nil {
-		if c.rpc.Config.Debug {
-			fmt.Printf("Failed to find project containing source: %v\n", err)
-		}
-		return nil, fmt.Errorf("find project containing source: %w", err)
-	}
 
-	if c.rpc.Config.Debug {
-		fmt.Printf("Found source %s in project %s\n", sourceID, projectID)
-	}
-
-	// Construct the NotebookLM web URL for this project
-	notebookURL := fmt.Sprintf("https://notebooklm.google.com/notebook/%s", projectID)
-	if c.rpc.Config.Debug {
-		fmt.Printf("Fetching HTML from: %s\n", notebookURL)
-	}
-
-	// Create HTTP request with authentication headers
-	req, err := http.NewRequest("GET", notebookURL, nil)
-	if err != nil {
-		return nil, fmt.Errorf("create request: %w", err)
-	}
-
-	// Add authentication cookies
-	req.Header.Set("Cookie", c.rpc.Config.Cookies)
-	req.Header.Set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36")
-
-	// Make the request
-	client := &http.Client{}
-	resp, err := client.Do(req)
-	if err != nil {
-		if c.rpc.Config.Debug {
-			fmt.Printf("HTTP request failed: %v\n", err)
-		}
-		return nil, fmt.Errorf("fetch page: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if c.rpc.Config.Debug {
-		fmt.Printf("HTTP response status: %s\n", resp.Status)
-	}
-
-	// Read the HTML content
-	htmlBytes, err := io.ReadAll(resp.Body)
-	if err != nil {
-		if c.rpc.Config.Debug {
-			fmt.Printf("Failed to read response body: %v\n", err)
-		}
-		return nil, fmt.Errorf("read response: %w", err)
-	}
-	htmlContent := string(htmlBytes)
-
-	if c.rpc.Config.Debug {
-		fmt.Printf("Fetched HTML content (%d bytes)\n", len(htmlContent))
-		// Save HTML content to a debug file for inspection
-		debugFile := fmt.Sprintf("/tmp/debug_html_%s.html", sourceID)
-		if err := os.WriteFile(debugFile, htmlBytes, 0644); err == nil {
-			fmt.Printf("Saved HTML content to %s for inspection\n", debugFile)
-		}
-		fmt.Printf("Checking HTML for sync status indicators...\n")
-	}
-
-	// Parse HTML content for sync status indicators
-	return c.parseHTMLForSyncStatus(htmlContent, sourceID, result)
-}
-
-// findProjectContainingSource finds which project contains the given source
-func (c *Client) findProjectContainingSource(sourceID string) (string, error) {
-	if c.rpc.Config.Debug {
-		fmt.Printf("Searching for source %s in project list...\n", sourceID)
-	}
-
-	resp, err := c.rpc.DoWithFullResponse(rpc.Call{
-		ID:   rpc.RPCListRecentlyViewedProjects,
-		Args: []interface{}{nil, 1},
-	})
-	if err != nil {
-		return "", fmt.Errorf("get projects: %w", err)
-	}
-
-	if c.rpc.Config.Debug {
-		fmt.Printf("Raw response data length: %d bytes\n", len(resp.Data))
-		fmt.Printf("RawArray length: %d elements\n", len(resp.RawArray))
-	}
-
-	// Parse the actual project data from resp.Data
-	var responseData []interface{}
-	if err := json.Unmarshal(resp.Data, &responseData); err != nil {
-		if c.rpc.Config.Debug {
-			fmt.Printf("JSON unmarshal error: %v\n", err)
-		}
-		return "", fmt.Errorf("parse response: %w", err)
-	}
-
-	if c.rpc.Config.Debug {
-		fmt.Printf("Response has %d top-level elements\n", len(responseData))
-		for i, elem := range responseData {
-			fmt.Printf("Element %d type: %T\n", i, elem)
-		}
-	}
-
-	// Search through projects to find the one containing our source
-	// Try index 0 first since that's where the project data appears to be
-	if len(responseData) > 0 {
-		if projects, ok := responseData[0].([]interface{}); ok {
-			if c.rpc.Config.Debug {
-				fmt.Printf("Found %d projects to search\n", len(projects))
-			}
-
-			for i, projectData := range projects {
-				if c.rpc.Config.Debug {
-					fmt.Printf("Project %d type: %T\n", i, projectData)
-				}
-
-				if project, ok := projectData.([]interface{}); ok && len(project) > 2 {
-					if c.rpc.Config.Debug {
-						fmt.Printf("Searching project %d (len=%d)...\n", i, len(project))
-					}
-
-					// project[1] = sources array, project[2] = project ID
-					if sourcesData, ok := project[1].([]interface{}); ok {
-						if c.rpc.Config.Debug {
-							fmt.Printf("  Project has %d sources\n", len(sourcesData))
-						}
-
-						for j, sourceData := range sourcesData {
-							if sourceArr, ok := sourceData.([]interface{}); ok && len(sourceArr) > 0 {
-								if sourceIDArr, ok := sourceArr[0].([]interface{}); ok && len(sourceIDArr) > 0 {
-									if sourceIDStr, ok := sourceIDArr[0].(string); ok {
-										if c.rpc.Config.Debug {
-											fmt.Printf("    Source %d: %s\n", j, sourceIDStr)
-										}
-
-										if sourceIDStr == sourceID {
-											// Found the source, return the project ID
-											if projectID, ok := project[2].(string); ok {
-												if c.rpc.Config.Debug {
-													fmt.Printf("Found source in project %s!\n", projectID)
-												}
-												return projectID, nil
-											}
-										}
-									}
-								}
-							}
-						}
-					}
-				}
-			}
-		} else {
-			if c.rpc.Config.Debug {
-				fmt.Printf("Could not parse projects array from response\n")
-			}
-		}
-	}
-
-	return "", fmt.Errorf("source not found in any project")
-}
-
-// parseHTMLForSyncStatus parses HTML content to determine sync status
-func (c *Client) parseHTMLForSyncStatus(htmlContent, sourceID string, result *SourceFreshnessResult) (*SourceFreshnessResult, error) {
-	// Look for the Japanese sync indicator text
-	syncNeededText := "クリックして Google ドライブと同期"
-
-	if strings.Contains(htmlContent, syncNeededText) {
-		if c.rpc.Config.Debug {
-			fmt.Printf("Found sync needed indicator in HTML: '%s'\n", syncNeededText)
-		}
-		result.Status = pb.SourceSettings_SOURCE_STATUS_DISABLED
-		result.Message = "Google Drive source needs synchronization (クリックして Google ドライブと同期)"
-		return result, nil
-	}
-
-	// Check for English sync indicator text as well
-	englishSyncText := "Click to sync with Google Drive"
-	if strings.Contains(htmlContent, englishSyncText) {
-		if c.rpc.Config.Debug {
-			fmt.Printf("Found English sync needed indicator in HTML: '%s'\n", englishSyncText)
-		}
-		result.Status = pb.SourceSettings_SOURCE_STATUS_DISABLED
-		result.Message = "Google Drive source needs synchronization (Click to sync with Google Drive)"
-		return result, nil
-	}
-
-	// Look for other sync-related indicators
-	otherSyncIndicators := []string{
-		"同期が必要",
-		"sync required",
-		"needs sync",
-		"要同期",
-	}
-
-	for _, indicator := range otherSyncIndicators {
-		if strings.Contains(htmlContent, indicator) {
-			if c.rpc.Config.Debug {
-				fmt.Printf("Found sync indicator in HTML: '%s'\n", indicator)
-			}
-			result.Status = pb.SourceSettings_SOURCE_STATUS_DISABLED
-			result.Message = fmt.Sprintf("Google Drive source needs synchronization (%s)", indicator)
-			return result, nil
-		}
-	}
-
-	// If no sync indicators found, assume synchronized
-	if c.rpc.Config.Debug {
-		fmt.Printf("No sync indicators found in HTML, assuming source is synchronized\n")
-	}
-	result.Status = pb.SourceSettings_SOURCE_STATUS_ENABLED
-	result.Message = "Google Drive source is properly synchronized"
-	return result, nil
-}
 
 func (c *Client) analyzeRawSourceStructure(sourceArr []interface{}, result *SourceFreshnessResult) (*SourceFreshnessResult, error) {
 	if c.rpc.Config.Debug {

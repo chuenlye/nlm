@@ -26,8 +26,9 @@ Source Commands:
   add <id> <input>  Add source to notebook
   rm-source <id> <source-id>  Remove source
   rename-source <source-id> <new-name>  Rename source
-  refresh-source <source-id>  Refresh source content
-  check-source <source-id>  Check source freshness
+  check-source <notebook-id> <source-id>  Check source freshness
+  refresh-source <notebook-id> <source-id>  Refresh source content
+  batch-sync <notebook-id> [--google-docs-only] [--force]  Batch sync sources
 
 Note Commands:
   notes <id>        List notes in notebook
@@ -154,6 +155,62 @@ nlm rename-source <source-id> "New Title"
 nlm rm-source <notebook-id> <source-id>
 ```
 
+### Source Synchronization
+
+For Google Docs sources that may become out of sync:
+
+```bash
+# Check if a single source needs synchronization
+nlm check-source <notebook-id> <source-id>
+
+# Manually refresh a single source
+nlm refresh-source <notebook-id> <source-id>
+
+# Batch sync all sources in a notebook
+nlm batch-sync <notebook-id>
+
+# Batch sync only Google Docs sources
+nlm batch-sync <notebook-id> --google-docs-only
+
+# Force sync all sources (skip freshness checks)
+nlm batch-sync <notebook-id> --force
+
+# Combine options: force sync only Google Docs
+nlm batch-sync <notebook-id> --google-docs-only --force
+```
+
+#### Batch Sync Features
+
+The `batch-sync` command provides comprehensive synchronization management:
+
+- **Automatic Detection**: Identifies Google Docs sources that need synchronization
+- **Progress Reporting**: Shows detailed results for each source processed
+- **Filtering Options**:
+  - `--google-docs-only`: Only process Google Docs sources
+  - `--force`: Skip freshness checks and sync all sources
+- **Status Tracking**: Reports sources as SYNCED, FAILED, SKIPPED, or NOT_NEEDED
+- **Error Handling**: Provides recommendations for failed syncs
+
+**Example Output:**
+```
+📊 Batch Sync Summary
+═════════════════════
+Total Sources: 5
+✅ Synced: 3
+❌ Failed: 0
+⏭️  Skipped: 2
+
+📋 Detailed Results
+═══════════════════
+STATUS    SOURCE              MESSAGE
+──────    ──────              ───────
+✅ SYNCED Research Paper.docx  Sync request sent successfully
+✅ SYNCED Meeting Notes.docx   Sync request sent successfully
+✅ SYNCED Project Plan.docx    Sync request sent successfully
+⏭️ SKIPPED image.png          Not a Google Docs source
+✓ NOT_NEEDED Data.xlsx        Source already synchronized
+```
+
 ### Note Operations
 
 ```bash
@@ -188,10 +245,12 @@ nlm audio-share <notebook-id> --public
 
 ## Examples 📋
 
+### Basic Workflow
+
 Create a notebook and add some content:
 ```bash
 # Create a new notebook
-notebook_id=$(nlm create "Research Notes" | grep -o 'notebook [^ ]*' | cut -d' ' -f2)
+notebook_id=$(nlm create "Research Notes")
 
 # Add some sources
 nlm add $notebook_id https://example.com/research-paper
@@ -202,6 +261,50 @@ nlm audio-create $notebook_id "summarize in a professional tone"
 
 # Check the audio overview
 nlm audio-get $notebook_id
+```
+
+### Daily Batch Sync Automation
+
+Automatically sync all Google Docs sources in your notebooks:
+```bash
+# Get all notebook IDs
+notebook_ids=$(nlm list | grep -o '^[a-f0-9-]*')
+
+# Batch sync Google Docs sources for each notebook
+for notebook_id in $notebook_ids; do
+    echo "Syncing notebook: $notebook_id"
+    nlm batch-sync $notebook_id --google-docs-only
+done
+```
+
+### Source Management Workflow
+
+```bash
+# Create a new notebook for a project
+project_id=$(nlm create "Project Documentation")
+
+# Add various sources
+nlm add $project_id project-spec.docx
+nlm add $project_id https://github.com/company/project
+nlm add $project_id meeting-notes.pdf
+
+# List all sources to get IDs
+nlm sources $project_id
+
+# Check sync status of a Google Docs source
+nlm check-source $project_id <source-id>
+
+# If needed, manually refresh the source
+nlm refresh-source $project_id <source-id>
+
+# Or batch sync all sources at once
+nlm batch-sync $project_id --google-docs-only
+
+# Create notes based on the synced content
+nlm new-note $project_id "Key Findings"
+
+# Generate audio overview
+nlm audio-create $project_id "create a technical summary for developers"
 ```
 
 ## Advanced Usage 🔧
@@ -221,6 +324,51 @@ nlm -debug list
 - `NLM_BROWSER_PROFILE`: Chrome profile to use for authentication (default: "Default")
 
 These are typically managed by the `auth` command, but can be manually configured if needed.
+
+### Batch Sync Best Practices
+
+For optimal synchronization management:
+
+**Daily Automation:**
+```bash
+# Create a daily sync script
+#!/bin/bash
+echo "Starting daily NotebookLM sync..."
+for notebook_id in $(nlm list | grep -o '^[a-f0-9-]*'); do
+    echo "Processing notebook: $notebook_id"
+    nlm batch-sync $notebook_id --google-docs-only
+done
+echo "Sync completed!"
+```
+
+**Troubleshooting Sync Issues:**
+```bash
+# Check individual source status
+nlm check-source <notebook-id> <source-id>
+
+# Force refresh problematic sources
+nlm refresh-source <notebook-id> <source-id>
+
+# Use debug mode for detailed diagnostics
+nlm -debug batch-sync <notebook-id> --force
+```
+
+**Performance Tips:**
+- Use `--google-docs-only` to focus on sources that can become stale
+- Run `batch-sync` without `--force` first to avoid unnecessary API calls
+- Use `--force` only when you need to ensure all sources are refreshed
+- Monitor sync results and address failed sources individually
+
+**Integration with CI/CD:**
+```bash
+# Add to your build pipeline
+nlm batch-sync $NOTEBOOK_ID --google-docs-only --force
+if [ $? -eq 0 ]; then
+    echo "Documentation sources synchronized successfully"
+else
+    echo "Warning: Some sources failed to sync"
+fi
+```
 
 ## Contributing 🤝
 
